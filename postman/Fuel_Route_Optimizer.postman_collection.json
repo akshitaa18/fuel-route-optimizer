@@ -1,0 +1,186 @@
+{
+  "info": {
+    "name": "Fuel Route Optimizer API",
+    "_postman_id": "c1f7a4e0-9832-4e4b-91bb-2195df871234",
+    "description": "Comprehensive Postman test collection for the Fuel Route Optimizer REST API, supporting route cost optimization, geocoding validation, corridor filtering, and fuel stop planning.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "System Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/health/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "health", ""]
+        },
+        "description": "Checks system health, database connection, and loaded station count."
+      },
+      "response": []
+    },
+    {
+      "name": "Optimize Route - New York to Los Angeles (Default)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Los Angeles, CA\",\n  \"max_range\": 500,\n  \"miles_per_gallon\": 10,\n  \"corridor_miles\": 5\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/route/optimize/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "route", "optimize", ""]
+        },
+        "description": "Calculates transcontinental driving route geometry, filters stations within 5-mile corridor, and runs Dynamic Programming optimization."
+      },
+      "response": []
+    },
+    {
+      "name": "Optimize Route - Chicago to Miami",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Chicago, IL\",\n  \"finish\": \"Miami, FL\",\n  \"max_range\": 500,\n  \"miles_per_gallon\": 10,\n  \"corridor_miles\": 5\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/route/optimize/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "route", "optimize", ""]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Optimize Route - Short Route (<500 mi, Zero Stops)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"New York, NY\",\n  \"finish\": \"Philadelphia, PA\",\n  \"max_range\": 500,\n  \"miles_per_gallon\": 10,\n  \"corridor_miles\": 5\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/route/optimize/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "route", "optimize", ""]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Optimize Route - Rejection of Non-US Location",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Toronto, Canada\",\n  \"finish\": \"New York, NY\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/route/optimize/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "route", "optimize", ""]
+        },
+        "description": "Verifies that non-US origins or destinations are rejected with HTTP 400."
+      },
+      "response": []
+    },
+    {
+      "name": "List Fuel Stations (Paginated)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/fuel-stations/?page=1",
+          "host": ["{{base_url}}"],
+          "path": ["api", "fuel-stations", ""],
+          "query": [
+            { "key": "page", "value": "1" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Filter Stations by State (Texas)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/fuel-stations/?state=TX&ordering=fuel_price",
+          "host": ["{{base_url}}"],
+          "path": ["api", "fuel-stations", ""],
+          "query": [
+            { "key": "state", "value": "TX" },
+            { "key": "ordering", "value": "fuel_price" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Filter Stations by Price Limit (<$3.00/gal)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/fuel-stations/?max_price=3.00&ordering=fuel_price",
+          "host": ["{{base_url}}"],
+          "path": ["api", "fuel-stations", ""],
+          "query": [
+            { "key": "max_price", "value": "3.00" },
+            { "key": "ordering", "value": "fuel_price" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "OpenAPI 3.0 Schema",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/schema/?format=json",
+          "host": ["{{base_url}}"],
+          "path": ["api", "schema", ""],
+          "query": [
+            { "key": "format", "value": "json" }
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000"
+    }
+  ]
+}

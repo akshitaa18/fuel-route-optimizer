@@ -12,11 +12,11 @@
 | Time Marker | Segment | Screen Content | Key Narrative |
 | :--- | :--- | :--- | :--- |
 | **0:00 – 0:45** | Introduction & Problem Scope | Architecture Diagram & Tech Stack | Problem statement, 500-mile range constraint, tech stack |
-| **0:45 – 1:30** | Interactive Map MVP Demonstration | Browser at `http://localhost:8000` | Transcontinental routing (NYC → LA), Leaflet visualization, stops |
-| **1:30 – 2:45** | Core Optimization: DP vs Greedy | Code Walkthrough (`optimization.py`) | Mathematical model, DAG relaxation, why greedy fails |
-| **2:45 – 3:45** | Performance & Geospatial Design | Management Pipeline & Services | Preprocessing 8k stations, lateral corridor projection, multi-level cache |
-| **3:45 – 4:30** | API Endpoints & Swagger Docs | Postman & Swagger UI (`/api/docs/`) | OpenAPI 3.0 schema, edge-case rejection, health check |
-| **4:30 – 5:00** | Test Suite & Conclusion | Terminal running Pytest & GitHub repo | 26 passing automated tests (100% offline), production readiness |
+| **0:45 – 1:30** | Interactive Map MVP Demonstration | Browser at `http://localhost:8000` | Transcontinental routing (NYC → LA), MapLibre/OpenFreeMap visualization, detour details |
+| **1:30 – 2:45** | Core Optimization: DP vs Greedy | Code Walkthrough (`optimization.py`) | Mathematical model, DAG relaxation with Decimal precision, tie-breaking |
+| **2:45 – 3:45** | Performance & Geospatial Design | Management Pipeline & Services | Preprocessing 8k stations, coordinate precision policy, corridor filtering |
+| **3:45 – 4:30** | API Endpoints & Swagger Docs | Postman & Swagger UI (`/api/docs/`) | OpenAPI 3.0 schema, physical range validation, active DB health probe |
+| **4:30 – 5:00** | Test Suite & Conclusion | Terminal running Pytest & GitHub repo | 32 passing automated tests (100% offline), technical reliability |
 
 ---
 
@@ -28,11 +28,11 @@
 - Terminal showing Django project structure.
 
 **Spoken Words:**
-> "Hello everyone! Today I am presenting the **Fuel Route Optimizer**, a production-grade backend API and interactive mapping service built to solve a critical logistical challenge: finding the globally cost-optimal sequence of fuel stops for commercial vehicles driving between any two locations in the United States.
+> "Hello everyone! Today I am presenting the **Fuel Route Optimizer**, a functional backend API and interactive mapping service built to solve a critical logistical challenge: finding the globally cost-optimal sequence of fuel stops for commercial vehicles driving between any two locations in the continental United States.
 >
 > Our vehicle operates under strict physical constraints: a maximum driving range of 500 miles on a full 50-gallon tank, achieving 10 miles per gallon.
 > 
-> The technology stack is powered by **Python 3.14**, **Django 6**, and **Django REST Framework**, with **Pandas** for fuel data preprocessing, **OSRM** for highway driving directions, and **Leaflet.js** for interactive map rendering. Let's dive right into the working application."
+> The technology stack is powered by **Python 3.14**, **Django 6**, and **Django REST Framework**, with **Pandas** for fuel data preprocessing, **OSRM** for highway driving directions, and **MapLibre GL JS** with **OpenFreeMap** for modern vector map rendering. Let's dive right into the working application."
 
 ---
 
@@ -41,7 +41,7 @@
 - Switch browser to `http://localhost:8000`.
 - Click preset: **NYC → LA**.
 - Point cursor to Start (Green Pin), Finish (Red Pin), and Amber Fuel Stop Pins.
-- Hover over an intermediate stop popup showing Station Name, Retail Price, Distance Along Route, and Segment Cost.
+- Hover over an intermediate stop popup showing Station Name, Retail Price, Distance Along Route, Segment Cost, and Coordinate Precision.
 
 **Spoken Words:**
 > "Here is our live dashboard. Let's run a full transcontinental route from **New York City to Los Angeles**.
@@ -50,7 +50,7 @@
 >
 > As you can see on the map:
 > - Total driving distance is **2,794 miles**, requiring **279.4 gallons of fuel**.
-> - The vehicle starts with an empty tank, utilizing our documented virtual refuel assumption at the cheapest station near the origin.
+> - The vehicle starts with an empty tank: we locate the cheapest reachable station within 25 miles of origin and explicitly calculate the road detour using a 1.2 circuity factor, ensuring the initial refuel cost is fully accounted for.
 > - Because 2,794 miles exceeds our 500-mile maximum range, the optimizer has selected **6 cost-optimal refueling stops** along the interstate highway corridor.
 > - Notice how each stop is strategically placed: every leg is under 500 miles, and the stations chosen offer the lowest fuel rates along the journey, achieving an average price of **$3.04 per gallon** and saving tens of dollars over a naive greedy choice."
 
@@ -59,7 +59,7 @@
 ### Segment 3: Deep Dive into Dynamic Programming vs Greedy (1:30 – 2:45)
 **Screen Action:**
 - Switch to VS Code / IDE. Open `fuel_optimizer/services/optimization.py`.
-- Highlight the DAG edge creation and dynamic programming relaxation loop.
+- Highlight the DAG edge creation, Python `Decimal` arithmetic, and dynamic programming relaxation loop.
 
 **Spoken Words:**
 > "Let’s look at the heart of this system: the **Core Cost Optimization Algorithm**.
@@ -70,9 +70,10 @@
 > 1. Nodes represent the Origin, eligible corridor stations, and Destination, sorted topologically by along-route mileage.
 > 2. A directed edge $(u, v)$ exists if and only if the distance along the route between station $u$ and station $v$ is $\le 500$ miles.
 > 3. The edge weight is the cost of fuel purchased at station $u$ to traverse the segment: $\Delta x / 10 \times \text{Price}(u)$.
-> 4. We perform dynamic programming relaxation over topological order in $\mathcal{O}(V \cdot E)$ time.
+> 4. We compute all transitions using Python's exact `Decimal` type to prevent floating-point rounding drift, with secondary tie-breaking favoring paths with fewer stops when costs are equal.
+> 5. We perform dynamic programming relaxation over topological order in $\mathcal{O}(V \cdot E)$ time.
 >
-> If a corridor has an unbridgeable gap greater than 500 miles, the algorithm immediately catches this and returns an informative error diagnosing the exact gap location."
+> If a corridor has an unbridgeable gap greater than 500 miles, the algorithm immediately catches this and returns an informative HTTP 422 error diagnosing the exact gap location."
 
 ---
 
@@ -82,16 +83,16 @@
 - Open terminal and show `python manage.py import_fuel_prices` output.
 
 **Spoken Words:**
-> "Now let's examine performance engineering. The OPIS dataset contains **8,151 station records** without latitude and longitude.
+> "Now let's examine geospatial data quality. The OPIS dataset contains **8,151 station records** without latitude and longitude.
 >
 > Geocoding 8,000 addresses sequentially over public APIs would take hours and trigger rate limits. We built an offline preprocessed gazetteer and batch ingestion pipeline in `import_fuel_prices.py`.
 >
-> In just **1.6 seconds**, our management command:
+> In just **0.9 seconds**, our management command:
 > - Deduplicates records, validates prices, and separates international Canadian stations.
-> - Resolves coordinates with 100% success for all 6,626 US stations.
+> - Resolves coordinates for all 6,626 US stations, tagging each with an explicit coordinate precision flag (`is_exact` and `geocode_source`).
 > - Stores them in SQLite with spatial indexes on `(latitude, longitude)`, `state`, and `fuel_price`.
 >
-> Furthermore, during routing, we do not evaluate all 6,626 stations. We apply a bounding-box database query, then compute cross-track Haversine projection to strictly admit stations within our configurable 5-mile corridor."
+> Furthermore, during routing, we do not evaluate all 6,626 stations. We apply a bounding-box database query, then compute cross-track Haversine projection normalized against OSRM's total driving distance to strictly admit stations within our configurable 5-mile corridor."
 
 ---
 
@@ -107,25 +108,30 @@
 > The primary endpoint is `POST /api/route/optimize/`. It accepts configurable parameters:
 > - `max_range`: defaults to 500 miles.
 > - `miles_per_gallon`: defaults to 10 MPG.
+> - `tank_capacity`: defaults to 50 gallons.
 > - `corridor_miles`: defaults to 5 miles.
 >
-> It returns the GeoJSON LineString geometry, summary metrics, and stop-by-stop itinerary.
+> It returns the GeoJSON LineString geometry, summary metrics, detour breakdown, and stop-by-stop itinerary.
 >
-> Error handling is rigorous: non-US locations like 'Toronto, Canada' are intercepted and rejected with HTTP 400, while invalid parameters return clear JSON error payloads."
+> Input validation is strict:
+> - Identical start and finish locations are rejected with HTTP 400.
+> - Physical vehicle constraints are validated: configured max range cannot exceed tank capacity multiplied by MPG.
+> - Non-US locations are rejected with HTTP 400.
+> - And `/api/health/` actively executes a live database probe, returning HTTP 200 when healthy or HTTP 503 if the database is unreachable."
 
 ---
 
 ### Segment 6: Test Suite & Conclusion (4:30 – 5:00)
 **Screen Action:**
 - Switch to terminal. Run `python -m pytest`.
-- Show 26 passed tests in ~1 second.
+- Show 32 passed tests in ~1 second.
 - Show Git log and GitHub repository.
 
 **Spoken Words:**
 > "Finally, let's verify reliability. When I run `pytest`:
-> **26 automated unit and integration tests** execute in just 1 second.
+> **32 automated unit and integration tests** execute in just 1 second.
 > 
-> All external HTTP requests to OSRM and geocoders are strictly mocked, allowing the test suite to run completely offline in CI/CD pipelines. We verify model integrity, US geocode boundaries, corridor math, greedy vs DP optimality, and API response contracts.
+> All external HTTP requests to OSRM and geocoders are strictly mocked, allowing the test suite to run completely offline in CI/CD pipelines. We verify model integrity, US geocode boundaries, corridor math, greedy vs DP optimality, 500-mile boundary feasibility, unreachable gap diagnosis, and Decimal calculation precision across multiple segments.
 >
 > The code is cleanly structured, formatted, and pushed to GitHub at `https://github.com/akshitaa18/fuel-route-optimizer`.
 >

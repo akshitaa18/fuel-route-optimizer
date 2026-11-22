@@ -1,4 +1,5 @@
 import os
+import warnings
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -13,7 +14,17 @@ SECRET_KEY = os.environ.get(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True').strip().lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+if not DEBUG and 'django-insecure' in SECRET_KEY:
+    warnings.warn(
+        "Insecure default SECRET_KEY is in use with DEBUG=False. Set SECRET_KEY in your environment.",
+        RuntimeWarning,
+    )
+
+allowed_hosts_env = os.environ.get('ALLOWED_HOSTS')
+if allowed_hosts_env:
+    ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_env.split(',') if h.strip()]
+else:
+    ALLOWED_HOSTS = ['*'] if DEBUG else ['localhost', '127.0.0.1', '[::1]']
 
 # Application definition
 INSTALLED_APPS = [
@@ -109,7 +120,14 @@ STATICFILES_DIRS = [
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS configuration
-CORS_ALLOW_ALL_ORIGINS = True
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    cors_origins_env = os.environ.get('CORS_ALLOWED_ORIGINS')
+    if cors_origins_env:
+        CORS_ALLOWED_ORIGINS = [o.strip() for o in cors_origins_env.split(',') if o.strip()]
+    else:
+        CORS_ALLOW_ALL_ORIGINS = False
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
@@ -126,7 +144,7 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Fuel Route Optimizer API',
     'DESCRIPTION': (
-        'Production-ready REST API for calculating optimal driving routes, '
+        'REST API for calculating optimal driving routes, '
         'identifying nearby fuel stations within configurable corridors, and determining '
         'the globally cost-optimal sequence of fuel stops using Dynamic Programming.'
     ),

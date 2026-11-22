@@ -5,10 +5,12 @@ from fuel_optimizer.models import FuelStation
 class RouteOptimizeRequestSerializer(serializers.Serializer):
     start = serializers.CharField(
         required=True,
+        trim_whitespace=True,
         help_text="Starting location name or address within the USA (e.g. 'New York, NY')"
     )
     finish = serializers.CharField(
         required=True,
+        trim_whitespace=True,
         help_text="Destination location name or address within the USA (e.g. 'Los Angeles, CA')"
     )
     max_range = serializers.FloatField(
@@ -25,6 +27,13 @@ class RouteOptimizeRequestSerializer(serializers.Serializer):
         max_value=100.0,
         help_text="Vehicle fuel efficiency in miles per gallon (default: 10)"
     )
+    tank_capacity = serializers.FloatField(
+        required=False,
+        default=50.0,
+        min_value=5.0,
+        max_value=500.0,
+        help_text="Vehicle fuel tank capacity in gallons (default: 50)"
+    )
     corridor_miles = serializers.FloatField(
         required=False,
         default=5.0,
@@ -32,6 +41,41 @@ class RouteOptimizeRequestSerializer(serializers.Serializer):
         max_value=50.0,
         help_text="Search corridor radius on either side of the driving route in miles (default: 5)"
     )
+
+    def validate_start(self, value):
+        s = value.strip()
+        if not s:
+            raise serializers.ValidationError("Starting location cannot be blank or whitespace.")
+        return s
+
+    def validate_finish(self, value):
+        f = value.strip()
+        if not f:
+            raise serializers.ValidationError("Destination location cannot be blank or whitespace.")
+        return f
+
+    def validate(self, attrs):
+        start = attrs.get('start', '').strip()
+        finish = attrs.get('finish', '').strip()
+        if start and finish and start.lower() == finish.lower():
+            raise serializers.ValidationError({
+                "finish": "Destination cannot be identical to the starting location."
+            })
+
+        max_range = attrs.get('max_range', 500.0)
+        mpg = attrs.get('miles_per_gallon', 10.0)
+        tank_capacity = attrs.get('tank_capacity', 50.0)
+
+        max_physical_range = round(tank_capacity * mpg, 2)
+        if max_range > max_physical_range:
+            raise serializers.ValidationError({
+                "max_range": (
+                    f"Configured maximum range ({max_range:.1f} mi) cannot exceed physical vehicle range "
+                    f"({tank_capacity:.1f} gal × {mpg:.1f} mpg = {max_physical_range:.1f} mi)."
+                )
+            })
+
+        return attrs
 
 
 class FuelStopSerializer(serializers.Serializer):
@@ -48,6 +92,8 @@ class FuelStopSerializer(serializers.Serializer):
     fuel_added_gallons = serializers.FloatField()
     segment_cost_usd = serializers.FloatField()
     coordinates = serializers.DictField()
+    is_exact = serializers.BooleanField(required=False, default=True)
+    geocode_source = serializers.CharField(required=False, default='exact')
 
 
 class FuelSummarySerializer(serializers.Serializer):
@@ -81,5 +127,6 @@ class FuelStationSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'station_id', 'station_name', 'address',
             'city', 'state', 'rack_id', 'fuel_price',
-            'latitude', 'longitude', 'created_at', 'updated_at'
+            'latitude', 'longitude', 'is_exact', 'geocode_source',
+            'created_at', 'updated_at'
         ]

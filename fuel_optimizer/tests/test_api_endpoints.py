@@ -30,6 +30,18 @@ class ApiEndpointsTest(TestCase):
             latitude=32.7767,
             longitude=-96.7970,
         )
+        FuelStation.objects.create(
+            station_id=3,
+            station_name="Metro Fuel Stop #3",
+            address="100 Turnpike Rd",
+            city="Newark",
+            state="NJ",
+            fuel_price=Decimal("3.1900"),
+            latitude=40.7357,
+            longitude=-74.1724,
+            is_exact=True,
+            geocode_source='exact'
+        )
 
     def test_health_check_endpoint(self):
         url = reverse('fuel_optimizer:health')
@@ -38,7 +50,18 @@ class ApiEndpointsTest(TestCase):
         data = response.json()
         self.assertEqual(data['status'], 'healthy')
         self.assertTrue(data['database']['connected'])
-        self.assertEqual(data['database']['total_stations'], 2)
+        self.assertEqual(data['database']['total_stations'], 3)
+
+    def test_health_check_database_failure_returns_503(self):
+        url = reverse('fuel_optimizer:health')
+        with patch('fuel_optimizer.views.connection.cursor') as mock_cursor:
+            mock_cursor.side_effect = Exception("Database connection failure")
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 503)
+            data = response.json()
+            self.assertEqual(data['status'], 'unhealthy')
+            self.assertFalse(data['database']['connected'])
+            self.assertIn('Database connection failure', data['database']['error'])
 
     def test_fuel_stations_list_and_filters(self):
         url = reverse('fuel_optimizer:fuel-stations')
@@ -47,7 +70,7 @@ class ApiEndpointsTest(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data['count'], 2)
+        self.assertEqual(data['count'], 3)
 
         # Test state filter
         response_tx = self.client.get(f"{url}?state=TX")
@@ -68,6 +91,33 @@ class ApiEndpointsTest(TestCase):
         data = response.json()
         self.assertFalse(data['success'])
         self.assertIn('details', data)
+
+    def test_route_optimize_identical_start_finish_returns_400(self):
+        url = reverse('fuel_optimizer:route-optimize')
+        payload = {
+            'start': 'New York, NY',
+            'finish': 'new york, ny'
+        }
+        response = self.client.post(url, data=payload, content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertIn('finish', data['details'])
+
+    def test_route_optimize_exceeds_physical_range_returns_400(self):
+        url = reverse('fuel_optimizer:route-optimize')
+        payload = {
+            'start': 'New York, NY',
+            'finish': 'Los Angeles, CA',
+            'max_range': 600.0,
+            'tank_capacity': 50.0,
+            'miles_per_gallon': 10.0  # 50 * 10 = 500 max physical range < 600
+        }
+        response = self.client.post(url, data=payload, content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertIn('max_range', data['details'])
 
     @patch('fuel_optimizer.views.GeocodingService.geocode')
     @patch('fuel_optimizer.views.RoutingService.get_route')
@@ -93,6 +143,7 @@ class ApiEndpointsTest(TestCase):
             'finish': 'Philadelphia, PA',
             'max_range': 500,
             'miles_per_gallon': 10,
+            'tank_capacity': 50,
             'corridor_miles': 5
         }
         response = self.client.post(url, data=payload, content_type='application/json')
@@ -100,9 +151,13 @@ class ApiEndpointsTest(TestCase):
         data = response.json()
         self.assertTrue(data['success'])
         self.assertEqual(data['route']['distance_miles'], 95.0)
-        self.assertEqual(data['fuel_summary']['total_fuel_gallons'], 9.5)
+        # 95.0 mi / 10 mpg = 9.5 gal + 10.6 mi detour / 10 mpg = 1.06 gal -> 10.56 gal total
+        self.assertEqual(data['fuel_summary']['total_fuel_gallons'], 10.56)
+        self.assertEqual(data['origin_refuel']['detour_miles'], 10.63)
+        self.assertTrue(data['origin_refuel']['is_detour_modelled'])
         self.assertIn('geometry', data['route'])
         self.assertIn('fuel_summary', data)
+        self.assertIn('origin_refuel', data)
         self.assertIn('metadata', data)
 
     def test_frontend_map_view(self):

@@ -1,12 +1,12 @@
 import math
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional
 from fuel_optimizer.models import FuelStation
 
 EARTH_RADIUS_MILES = 3958.8
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate the great-circle distance between two points in miles."""
+    """Calculate the great-circle distance between two geographic points in miles."""
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
@@ -18,42 +18,42 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
 
 class StationFilterService:
     """
-    Filters and projects fuel stations along a driving route geometry
+    Filters and projects fuel stations along an OSRM driving route geometry
     within a specified lateral corridor (default 5 miles).
+    
+    Approximation Disclosure:
+    - `distance_from_route_miles` represents the perpendicular cross-track (Euclidean/Haversine)
+      distance from the route polyline to the station coordinates, NOT an exact road driving detour.
+    - Along-route station positions are projected onto the simplified route polyline and scaled
+      proportionally to ensure strict mathematical consistency with OSRM's total driving distance.
     """
 
     @classmethod
     def filter_stations_along_route(
         cls,
         route_coordinates: List[List[float]],  # [[lon, lat], ...]
-        corridor_miles: float = 5.0
+        corridor_miles: float = 5.0,
+        total_route_distance_miles: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        Identify fuel stations within corridor_miles of the route.
+        Identify fuel stations within corridor_miles of the route polyline.
         
+        Args:
+            route_coordinates: List of [longitude, latitude] pairs from OSRM GeoJSON geometry.
+            corridor_miles: Maximum allowable perpendicular distance from route polyline (miles).
+            total_route_distance_miles: Optional total driving distance reported by OSRM for normalization.
+            
         Returns:
-            List of dicts sorted by 'distance_along_route':
-            [{
-                'station_id': int,
-                'station_name': str,
-                'address': str,
-                'city': str,
-                'state': str,
-                'fuel_price': float,
-                'latitude': float,
-                'longitude': float,
-                'distance_from_route_miles': float,
-                'distance_along_route_miles': float,
-            }, ...]
+            List of station dicts sorted in strict travel order by 'distance_along_route_miles'.
         """
         if not route_coordinates or len(route_coordinates) < 2:
             return []
 
-        # Convert to [(lat, lon)]
+        # Convert GeoJSON [lon, lat] to [(lat, lon)]
         route_pts = [(pt[1], pt[0]) for pt in route_coordinates]
         num_pts = len(route_pts)
 
-        # 1. Compute cumulative along-route distances for polyline vertices
+        # 1. Compute cumulative along-route distances for polyline vertices using Haversine
         cumulative_dist = [0.0] * num_pts
         for i in range(1, num_pts):
             prev_lat, prev_lon = route_pts[i - 1]
@@ -61,34 +61,42 @@ class StationFilterService:
             seg_dist = haversine_distance(prev_lat, prev_lon, curr_lat, curr_lon)
             cumulative_dist[i] = cumulative_dist[i - 1] + seg_dist
 
-        total_route_length = cumulative_dist[-1]
+        poly_total_length = cumulative_dist[-1]
 
-        # 2. Compute bounding box for DB candidate pre-filtering
+        # Scaling factor to align polyline Haversine sum with OSRM road distance
+        scale_factor = 1.0
+        if total_route_distance_miles is not None and total_route_distance_miles > 0 and poly_total_length > 0:
+            scale_factor = total_route_distance_miles / poly_total_length
+
+        max_allowed_dist = total_route_distance_miles if total_route_distance_miles else poly_total_length
+
+        # 2. Compute bounding box for DB candidate pre-filtering to prevent full-table scans
         lats = [pt[0] for pt in route_pts]
         lons = [pt[1] for pt in route_pts]
         min_lat, max_lat = min(lats), max(lats)
         min_lon, max_lon = min(lons), max(lons)
 
-        # Buffer: corridor_miles in degrees (~69 miles per degree lat)
+        # Buffer: corridor_miles converted to degree bounds (~69 miles per lat degree)
         lat_buffer = (corridor_miles / 60.0) + 0.1
         avg_lat_rad = math.radians((min_lat + max_lat) / 2.0)
         cos_lat = max(math.cos(avg_lat_rad), 0.1)
         lon_buffer = (corridor_miles / (60.0 * cos_lat)) + 0.1
 
-        # Query only stations in the bounding box
+        # Query stations in the bounding box
         candidate_stations = FuelStation.objects.filter(
             latitude__gte=min_lat - lat_buffer,
             latitude__lte=max_lat + lat_buffer,
             longitude__gte=min_lon - lon_buffer,
             longitude__lte=max_lon + lon_buffer,
-        ).only('id', 'station_id', 'station_name', 'address', 'city', 'state', 'fuel_price', 'latitude', 'longitude')
+        ).only(
+            'id', 'station_id', 'station_name', 'address', 'city',
+            'state', 'fuel_price', 'latitude', 'longitude', 'is_exact', 'geocode_source'
+        )
 
         if not candidate_stations.exists():
             return []
 
-        # To optimize cross-track projection for routes with thousands of coordinates,
-        # sample/simplify route segments or evaluate segments efficiently
-        # OSRM full overview can have 30k points. We sample vertices so segments are ~0.2 to 0.5 miles apart.
+        # 3. Simplify route vertices for efficient projection on long routes (step ~0.25 mi)
         simplified_indices = [0]
         step_threshold = 0.25  # miles
         last_added_idx = 0
@@ -103,8 +111,7 @@ class StationFilterService:
         simplified_cum_dist = [cumulative_dist[idx] for idx in simplified_indices]
         num_simp = len(simplified_pts)
 
-        # Precalculate segment vectors in miles using equirectangular projection
-        # x_dist = dlon * 69.17 * cos(lat_mid), y_dist = dlat * 69.17
+        # Precalculate segment projection vectors in miles using equirectangular projection
         segments = []
         for i in range(num_simp - 1):
             lat_a, lon_a = simplified_pts[i]
@@ -128,7 +135,6 @@ class StationFilterService:
                 'cum_start': simplified_cum_dist[i],
                 'cum_end': simplified_cum_dist[i + 1],
                 'seg_dist': simplified_cum_dist[i + 1] - simplified_cum_dist[i],
-                # Bounding box for segment
                 'min_lat': min(lat_a, lat_b),
                 'max_lat': max(lat_a, lat_b),
                 'min_lon': min(lon_a, lon_b),
@@ -137,6 +143,7 @@ class StationFilterService:
 
         eligible_stations = []
 
+        # 4. Project each candidate station onto closest segment
         for station in candidate_stations:
             s_lat = station.latitude
             s_lon = station.longitude
@@ -144,14 +151,13 @@ class StationFilterService:
             min_cross_track = float('inf')
             best_along_dist = 0.0
 
-            # Find closest segment
             for seg in segments:
-                # Fast reject if station is far from segment bounding box
+                # Fast rejection if outside segment bounding box
                 if (s_lat < seg['min_lat'] - lat_buffer or s_lat > seg['max_lat'] + lat_buffer or
-                    s_lon < seg['min_lon'] - lon_buffer or s_lon > seg['max_lon'] + lon_buffer):
+                        s_lon < seg['min_lon'] - lon_buffer or s_lon > seg['max_lon'] + lon_buffer):
                     continue
 
-                # Equirectangular projection of station onto segment
+                # Local equirectangular projection
                 wx = (s_lon - seg['lon_a']) * seg['kx']
                 wy = (s_lat - seg['lat_a']) * seg['ky']
 
@@ -171,7 +177,13 @@ class StationFilterService:
 
             cross_track_miles = math.sqrt(min_cross_track) if min_cross_track != float('inf') else float('inf')
 
+            # Filter within lateral corridor
             if cross_track_miles <= corridor_miles:
+                # Apply normalization factor to align with OSRM total distance
+                normalized_along_dist = best_along_dist * scale_factor
+                # Clamp within [0, max_allowed_dist]
+                final_along_dist = round(min(max_allowed_dist, max(0.0, normalized_along_dist)), 2)
+
                 eligible_stations.append({
                     'id': station.id,
                     'station_id': station.station_id,
@@ -182,11 +194,13 @@ class StationFilterService:
                     'fuel_price': float(station.fuel_price),
                     'latitude': s_lat,
                     'longitude': s_lon,
+                    'is_exact': station.is_exact,
+                    'geocode_source': station.geocode_source,
                     'distance_from_route_miles': round(cross_track_miles, 2),
-                    'distance_along_route_miles': round(best_along_dist, 2),
+                    'distance_along_route_miles': final_along_dist,
                 })
 
-        # Sort strictly by distance along route from start
+        # 5. Sort strictly in travel order along the route
         eligible_stations.sort(key=lambda x: x['distance_along_route_miles'])
 
         return eligible_stations

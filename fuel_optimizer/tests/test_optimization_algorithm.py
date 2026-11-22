@@ -1,5 +1,7 @@
+from decimal import Decimal
 from django.test import TestCase
-from fuel_optimizer.services.optimization import FuelRouteOptimizer, OptimizationError
+from fuel_optimizer.models import FuelStation
+from fuel_optimizer.services.optimization import FuelRouteOptimizer, OptimizationError, ROAD_CIRCUITY_FACTOR
 
 
 class FuelRouteOptimizerTest(TestCase):
@@ -11,121 +13,43 @@ class FuelRouteOptimizerTest(TestCase):
             tank_capacity_gallons=50.0,
             origin_refuel_radius_miles=25.0
         )
-
-    def test_short_route_under_500_miles_requires_zero_stops_when_stations_more_expensive(self):
-        """When intermediate stations are more expensive than origin fuel, zero stops are made."""
-        result = self.optimizer.optimize_route(
-            start_location="New York, NY",
-            start_coords=(40.7128, -74.0060),
-            finish_location="Washington, DC",
-            finish_coords=(38.9072, -77.0369),
-            total_distance_miles=225.0,
-            duration_hours=4.0,
-            route_geometry={"type": "LineString", "coordinates": []},
-            eligible_stations=[
-                {
-                    'station_id': 10,
-                    'station_name': 'Expensive Midway Plaza',
-                    'address': 'I-95 Exit 4',
-                    'city': 'Newark',
-                    'state': 'DE',
-                    'fuel_price': 4.99,  # More expensive than origin refuel
-                    'latitude': 39.6837,
-                    'longitude': -75.7497,
-                    'distance_along_route_miles': 110.0,
-                }
-            ]
+        # Standard seed origin station at NYC
+        self.nyc_station = FuelStation.objects.create(
+            station_id=901,
+            station_name="NYC Origin Fuel Stop",
+            address="100 West 33rd St",
+            city="New York",
+            state="NY",
+            rack_id=1,
+            fuel_price=Decimal("3.5000"),
+            latitude=40.7128,
+            longitude=-74.0060,
+            is_exact=True,
+            geocode_source='exact'
         )
 
-        self.assertTrue(result['success'])
-        self.assertEqual(result['fuel_summary']['num_stops'], 0)
-        self.assertEqual(len(result['stops']), 0)
-        self.assertEqual(result['fuel_summary']['total_distance_miles'], 225.0)
-        self.assertEqual(result['fuel_summary']['total_fuel_gallons'], 22.5)
-
-    def test_short_route_with_no_stations(self):
-        """Routes under 500 miles with zero intermediate stations succeed without stops."""
-        result = self.optimizer.optimize_route(
-            start_location="Start",
-            start_coords=(40.0, -75.0),
-            finish_location="End",
-            finish_coords=(40.0, -78.0),
-            total_distance_miles=180.0,
-            duration_hours=3.0,
-            route_geometry={"type": "LineString", "coordinates": []},
-            eligible_stations=[]
-        )
-        self.assertTrue(result['success'])
-        self.assertEqual(result['fuel_summary']['num_stops'], 0)
-        self.assertEqual(result['fuel_summary']['total_fuel_gallons'], 18.0)
-
-    def test_long_route_selects_feasible_stops_within_range(self):
-        """For a 900-mile route, stops must be chosen such that no segment exceeds 500 miles."""
-        eligible_stations = [
-            {
-                'station_id': 1,
-                'station_name': 'Stop A',
-                'address': 'Hwy 1',
-                'city': 'City A',
-                'state': 'OH',
-                'fuel_price': 3.10,
-                'latitude': 41.0,
-                'longitude': -82.0,
-                'distance_along_route_miles': 300.0,
-            },
-            {
-                'station_id': 2,
-                'station_name': 'Stop B',
-                'address': 'Hwy 2',
-                'city': 'City B',
-                'state': 'IN',
-                'fuel_price': 3.25,
-                'latitude': 41.0,
-                'longitude': -85.0,
-                'distance_along_route_miles': 450.0,
-            },
-            {
-                'station_id': 3,
-                'station_name': 'Stop C',
-                'address': 'Hwy 3',
-                'city': 'City C',
-                'state': 'IL',
-                'fuel_price': 2.95,
-                'latitude': 41.0,
-                'longitude': -89.0,
-                'distance_along_route_miles': 700.0,
-            }
-        ]
-
-        result = self.optimizer.optimize_route(
-            start_location="Start City",
-            start_coords=(41.0, -74.0),
-            finish_location="End City",
-            finish_coords=(41.0, -92.0),
-            total_distance_miles=900.0,
-            duration_hours=15.0,
-            route_geometry={"type": "LineString", "coordinates": []},
-            eligible_stations=eligible_stations
-        )
-
-        self.assertTrue(result['success'])
-        self.assertTrue(result['fuel_summary']['num_stops'] >= 1)
-
-        # Verify that distance between every consecutive stop is <= 500 miles
-        prev_mile = 0.0
-        for stop in result['stops']:
-            leg = stop['distance_along_route_miles'] - prev_mile
-            self.assertLessEqual(leg, 500.0)
-            prev_mile = stop['distance_along_route_miles']
-
-        final_leg = 900.0 - prev_mile
-        self.assertLessEqual(final_leg, 500.0)
-
+    # -------------------------------------------------------------------------
+    # Scenario 1: DP Outperforms Greedy Algorithm
+    # -------------------------------------------------------------------------
     def test_dp_outperforms_greedy_approach(self):
         """
         Verify DP finds the global cost optimum where a greedy algorithm
-        (choosing the cheapest locally reachable station) is tricked into a globally expensive route.
+        (choosing the cheapest locally reachable station) is tricked into an expensive route.
         """
+        # Create station at origin (38.0, -88.0)
+        FuelStation.objects.create(
+            station_id=100,
+            station_name="Midwest Origin Stop",
+            address="1 Origin Way",
+            city="Mount Vernon",
+            state="IL",
+            fuel_price=Decimal("3.5000"),
+            latitude=38.0,
+            longitude=-88.0,
+            is_exact=True,
+            geocode_source='exact'
+        )
+
         eligible = [
             {
                 'station_id': 1,
@@ -178,11 +102,11 @@ class FuelRouteOptimizerTest(TestCase):
         # At Station 1 (100 mi): can only reach up to 600 mi. Only Station 2 (590 mi, $5.00) is reachable.
         # At Station 2 (590 mi): reaches Destination (1000 mi, 410 mi leg).
         # Greedy costs:
-        # leg 1 (100 mi): 10 gal @ origin price (~$3.49) = $34.90
+        # leg 1 (100 mi): 10 gal @ origin price ($3.50) = $35.00
         # leg 2 (490 mi): 49 gal @ $2.00 = $98.00
         # leg 3 (410 mi): 41 gal @ $5.00 = $205.00
-        # Total Greedy cost = $337.90
-        greedy_cost = (10.0 * 3.49) + (49.0 * 2.00) + (41.0 * 5.00)
+        # Total Greedy cost = $338.00
+        greedy_cost = (10.0 * 3.50) + (49.0 * 2.00) + (41.0 * 5.00)
 
         result = self.optimizer.optimize_route(
             start_location="Test Origin",
@@ -197,15 +121,66 @@ class FuelRouteOptimizerTest(TestCase):
 
         dp_cost = result['fuel_summary']['total_fuel_cost_usd']
         self.assertLess(dp_cost, greedy_cost)
-        
+
         # Verify DP chose the balanced optimal stations and avoided the expensive $5.00 station
         chosen_station_ids = [s['station_id'] for s in result['stops']]
         self.assertNotIn(2, chosen_station_ids)
         self.assertIn(3, chosen_station_ids)
         self.assertIn(4, chosen_station_ids)
 
+    # -------------------------------------------------------------------------
+    # Scenario 2: Destination Reachable Without Intermediate Stops
+    # -------------------------------------------------------------------------
+    def test_destination_reachable_without_intermediate_stops(self):
+        """Routes <= 500 miles require 0 intermediate fuel stops when stations are more expensive."""
+        result = self.optimizer.optimize_route(
+            start_location="New York, NY",
+            start_coords=(40.7128, -74.0060),
+            finish_location="Washington, DC",
+            finish_coords=(38.9072, -77.0369),
+            total_distance_miles=225.0,
+            duration_hours=4.0,
+            route_geometry={"type": "LineString", "coordinates": []},
+            eligible_stations=[
+                {
+                    'station_id': 10,
+                    'station_name': 'Expensive Midway Plaza',
+                    'address': 'I-95 Exit 4',
+                    'city': 'Newark',
+                    'state': 'DE',
+                    'fuel_price': 4.99,  # More expensive than origin refuel ($3.50)
+                    'latitude': 39.6837,
+                    'longitude': -75.7497,
+                    'distance_along_route_miles': 110.0,
+                }
+            ]
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['fuel_summary']['num_stops'], 0)
+        self.assertEqual(len(result['stops']), 0)
+        self.assertEqual(result['fuel_summary']['route_distance_miles'], 225.0)
+        # 225 miles / 10 mpg = 22.5 gal (detour is 0.0 because station is at exact start coords)
+        self.assertEqual(result['fuel_summary']['total_fuel_gallons'], 22.5)
+        # 22.5 gal * $3.50 = $78.75
+        self.assertEqual(result['fuel_summary']['total_fuel_cost_usd'], 78.75)
+
+    # -------------------------------------------------------------------------
+    # Scenario 3: Unreachable Range Gap Raises OptimizationError
+    # -------------------------------------------------------------------------
     def test_unreachable_gap_raises_optimization_error(self):
-        """When a gap exceeds max_range, an informative OptimizationError is raised."""
+        """When a distance gap between consecutive stations exceeds max_range, OptimizationError is raised."""
+        FuelStation.objects.create(
+            station_id=101,
+            station_name="Desert Start Fuel",
+            address="Main St",
+            city="Ely",
+            state="NV",
+            fuel_price=Decimal("3.2000"),
+            latitude=39.0,
+            longitude=-114.0,
+        )
+
         eligible = [
             {
                 'station_id': 1,
@@ -234,4 +209,227 @@ class FuelRouteOptimizerTest(TestCase):
             )
 
         self.assertIn("Destination is unreachable", str(ctx.exception))
-        self.assertIn("gap", str(ctx.exception))
+        self.assertIn("gap", str(ctx.exception).lower())
+
+    # -------------------------------------------------------------------------
+    # Scenario 4: Station Exactly at Max Range Boundary (500 Miles)
+    # -------------------------------------------------------------------------
+    def test_station_exactly_at_max_range_boundary(self):
+        """A station situated at exactly 500.0 miles must be considered feasible (<= max_range)."""
+        eligible = [
+            {
+                'station_id': 500,
+                'station_name': 'Boundary Station 500',
+                'address': 'Mile 500 Marker',
+                'city': 'Boundary City',
+                'state': 'OH',
+                'fuel_price': 3.00,
+                'latitude': 40.0,
+                'longitude': -80.0,
+                'distance_along_route_miles': 500.0,  # Exactly at the 500-mile limit
+            }
+        ]
+
+        result = self.optimizer.optimize_route(
+            start_location="New York, NY",
+            start_coords=(40.7128, -74.0060),
+            finish_location="Midwest City",
+            finish_coords=(40.0, -85.0),
+            total_distance_miles=900.0,
+            duration_hours=14.0,
+            route_geometry={"type": "LineString", "coordinates": []},
+            eligible_stations=eligible
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['fuel_summary']['num_stops'], 1)
+        self.assertEqual(result['stops'][0]['station_id'], 500)
+        self.assertEqual(result['stops'][0]['distance_along_route_miles'], 500.0)
+
+    # -------------------------------------------------------------------------
+    # Scenario 5: Multiple Stations at Nearly Identical Positions (Deduplication)
+    # -------------------------------------------------------------------------
+    def test_multiple_stations_at_nearly_identical_positions(self):
+        """When multiple stations exist at the same mile marker, the cheaper one is chosen."""
+        eligible = [
+            {
+                'station_id': 101,
+                'station_name': 'Expensive Exit Station',
+                'address': 'Exit 40 East',
+                'city': 'Crossroads',
+                'state': 'PA',
+                'fuel_price': 3.80,
+                'latitude': 40.5,
+                'longitude': -76.0,
+                'distance_along_route_miles': 300.0,
+            },
+            {
+                'station_id': 102,
+                'station_name': 'Cheaper Exit Station',
+                'address': 'Exit 40 West',
+                'city': 'Crossroads',
+                'state': 'PA',
+                'fuel_price': 2.75,
+                'latitude': 40.5,
+                'longitude': -76.01,
+                'distance_along_route_miles': 300.2,
+            }
+        ]
+
+        result = self.optimizer.optimize_route(
+            start_location="New York, NY",
+            start_coords=(40.7128, -74.0060),
+            finish_location="Cleveland, OH",
+            finish_coords=(41.4993, -81.6944),
+            total_distance_miles=650.0,
+            duration_hours=10.0,
+            route_geometry={"type": "LineString", "coordinates": []},
+            eligible_stations=eligible
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['fuel_summary']['num_stops'], 1)
+        self.assertEqual(result['stops'][0]['station_id'], 102)
+        self.assertEqual(result['stops'][0]['fuel_price'], 2.75)
+
+    # -------------------------------------------------------------------------
+    # Scenario 6: Initial Station Not Reachable (> Origin Radius)
+    # -------------------------------------------------------------------------
+    def test_initial_station_unreachable_raises_optimization_error(self):
+        """When no station exists within origin_refuel_radius, an informative error is raised."""
+        # Using remote coords in Alaska where no station exists within 25 miles
+        remote_coords = (65.0, -150.0)
+
+        with self.assertRaises(OptimizationError) as ctx:
+            self.optimizer.optimize_route(
+                start_location="Remote Wilderness, AK",
+                start_coords=remote_coords,
+                finish_location="Fairbanks, AK",
+                finish_coords=(64.8378, -147.7164),
+                total_distance_miles=150.0,
+                duration_hours=3.0,
+                route_geometry={"type": "LineString", "coordinates": []},
+                eligible_stations=[]
+            )
+
+        self.assertIn("No eligible fuel station found within", str(ctx.exception))
+        self.assertIn("empty-tank assumption", str(ctx.exception))
+
+    # -------------------------------------------------------------------------
+    # Scenario 7: Fuel Cost Calculated Correctly Across Multiple Segments with Decimal Precision
+    # -------------------------------------------------------------------------
+    def test_fuel_cost_calculated_correctly_across_multiple_segments_decimal_precision(self):
+        """
+        Verify that total cost strictly matches the sum of origin cost + stop segment costs
+        without IEEE 754 floating point rounding drift.
+        """
+        eligible = [
+            {
+                'station_id': 201,
+                'station_name': 'Segment Stop 1',
+                'address': 'I-80 Mile 240',
+                'city': 'Bloomsburg',
+                'state': 'PA',
+                'fuel_price': 3.129,
+                'latitude': 41.0,
+                'longitude': -76.5,
+                'distance_along_route_miles': 240.0,
+            },
+            {
+                'station_id': 202,
+                'station_name': 'Segment Stop 2',
+                'address': 'I-80 Mile 580',
+                'city': 'Youngstown',
+                'state': 'OH',
+                'fuel_price': 2.949,
+                'latitude': 41.1,
+                'longitude': -80.6,
+                'distance_along_route_miles': 580.0,
+            }
+        ]
+
+        result = self.optimizer.optimize_route(
+            start_location="New York, NY",
+            start_coords=(40.7128, -74.0060),
+            finish_location="Chicago, IL",
+            finish_coords=(41.8781, -87.6298),
+            total_distance_miles=790.0,
+            duration_hours=13.0,
+            route_geometry={"type": "LineString", "coordinates": []},
+            eligible_stations=eligible
+        )
+
+        self.assertTrue(result['success'])
+        fuel_summary = result['fuel_summary']
+        origin_refuel = result['origin_refuel']
+        stops = result['stops']
+
+        # Verify total gallons strictly equals total origin gallons + sum of stop gallons
+        sum_gallons = round(origin_refuel['total_origin_gallons'] + sum(s['fuel_added_gallons'] for s in stops), 2)
+        self.assertEqual(fuel_summary['total_fuel_gallons'], sum_gallons)
+
+        # Verify total cost strictly equals total origin cost + sum of segment costs
+        sum_costs = round(origin_refuel['total_origin_cost_usd'] + sum(s['segment_cost_usd'] for s in stops), 2)
+        self.assertEqual(fuel_summary['total_fuel_cost_usd'], sum_costs)
+
+    # -------------------------------------------------------------------------
+    # Scenario 8: Fewer Stops Chosen When Costs Are Equal (Tie-Breaker)
+    # -------------------------------------------------------------------------
+    def test_route_uses_fewer_stops_when_costs_are_equal_tie_breaker(self):
+        """When multiple valid paths have equal fuel cost, the route with fewer stops is preferred."""
+        # Route is 800 miles. Max range is 500 miles.
+        # Path 1 (2 stops): 0 -> 200 mi (Station 301) -> 500 mi (Station 303) -> 800 mi.
+        # Path 2 (1 stop):  0 -> 400 mi (Station 302) -> 800 mi.
+        # Both paths use fuel at $3.50/gal everywhere -> identical cost (80 gal * $3.50 = $280).
+        # Tie-breaker MUST select Path 2 with 1 stop over Path 1 with 2 stops.
+        eligible = [
+            {
+                'station_id': 301,
+                'station_name': 'Two-Stop Candidate A',
+                'address': 'Mile 200',
+                'city': 'Town 1',
+                'state': 'PA',
+                'fuel_price': 3.50,
+                'latitude': 40.5,
+                'longitude': -77.0,
+                'distance_along_route_miles': 200.0,
+            },
+            {
+                'station_id': 302,
+                'station_name': 'One-Stop Candidate (Tie Winner)',
+                'address': 'Mile 400',
+                'city': 'Town 2',
+                'state': 'PA',
+                'fuel_price': 3.50,
+                'latitude': 40.5,
+                'longitude': -78.5,
+                'distance_along_route_miles': 400.0,
+            },
+            {
+                'station_id': 303,
+                'station_name': 'Two-Stop Candidate B',
+                'address': 'Mile 500',
+                'city': 'Town 3',
+                'state': 'OH',
+                'fuel_price': 3.50,
+                'latitude': 40.5,
+                'longitude': -80.0,
+                'distance_along_route_miles': 500.0,
+            }
+        ]
+
+        result = self.optimizer.optimize_route(
+            start_location="New York, NY",
+            start_coords=(40.7128, -74.0060),
+            finish_location="Midwest Hub",
+            finish_coords=(41.0, -84.0),
+            total_distance_miles=800.0,
+            duration_hours=12.5,
+            route_geometry={"type": "LineString", "coordinates": []},
+            eligible_stations=eligible
+        )
+
+        self.assertTrue(result['success'])
+        # The 1-stop path must be selected over the 2-stop path
+        self.assertEqual(result['fuel_summary']['num_stops'], 1)
+        self.assertEqual(result['stops'][0]['station_id'], 302)

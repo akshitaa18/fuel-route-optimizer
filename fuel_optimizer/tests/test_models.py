@@ -16,12 +16,16 @@ class FuelStationModelTest(TestCase):
             fuel_price=Decimal("3.1590"),
             latitude=35.2220,
             longitude=-101.8313,
+            is_exact=True,
+            geocode_source='exact'
         )
 
     def test_station_creation_and_str(self):
         self.assertEqual(self.station.station_id, 101)
         self.assertEqual(self.station.state, "TX")
-        self.assertEqual(str(self.station), "Pilot Travel Center #101 (Amarillo, TX) - $3.1590/gal")
+        self.assertTrue(self.station.is_exact)
+        self.assertEqual(self.station.geocode_source, 'exact')
+        self.assertEqual(str(self.station), "Pilot Travel Center #101 (Amarillo, TX) - $3.1590/gal [exact]")
 
     def test_decimal_precision(self):
         self.assertEqual(float(self.station.fuel_price), 3.159)
@@ -32,9 +36,10 @@ class FuelStationModelTest(TestCase):
             latitude=40.7128,
             longitude=-74.0060,
             formatted_address="New York, NY, USA",
-            provider="test_provider"
+            provider="test_provider",
+            is_exact=True
         )
-        self.assertEqual(str(cache_entry), "NEW YORK, NY -> (40.7128, -74.006)")
+        self.assertEqual(str(cache_entry), "NEW YORK, NY -> (40.7128, -74.006) [exact]")
 
     def test_route_cache_creation(self):
         route = RouteCache.objects.create(

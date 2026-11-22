@@ -153,9 +153,16 @@
                  class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
         </div>
 
+        <!-- Tank Capacity -->
+        <div class="md:col-span-1">
+          <label class="block text-xs font-medium text-slate-300 mb-1" title="Tank capacity in gallons">Tank (gal)</label>
+          <input type="number" id="tankInput" value="50" min="5" max="250" step="1"
+                 class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
+        </div>
+
         <!-- Corridor -->
         <div class="md:col-span-1">
-          <label class="block text-xs font-medium text-slate-300 mb-1" title="Corridor radius from route">Corridor (mi)</label>
+          <label class="block text-xs font-medium text-slate-300 mb-1" title="Corridor radius from route">Corridor</label>
           <input type="number" id="corridorInput" value="5" min="1" max="25" step="0.5"
                  class="w-full bg-slate-900 border border-slate-600 rounded-lg px-2.5 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
         </div>
@@ -168,6 +175,16 @@
           </button>
         </div>
       </form>
+      <div class="mt-3 pt-3 border-t border-slate-700/60 flex flex-wrap items-center justify-between text-xs text-slate-400 gap-2">
+        <div class="flex items-center gap-3">
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-emerald-400"></span> Empty-tank origin start</span>
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-blue-400"></span> 1.2x road circuity detour model</span>
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-amber-400"></span> 25-mi origin refuel search</span>
+        </div>
+        <div class="text-slate-400">
+          Constraints: <code class="text-emerald-300">range &le; tank &times; mpg</code> &bull; <code class="text-emerald-300">corridor &le; 25 mi</code>
+        </div>
+      </div>
     </div>
 
     <!-- Feedback / Status Banner -->
@@ -307,7 +324,23 @@
       const finish = document.getElementById('finishInput').value.trim();
       const max_range = parseFloat(document.getElementById('maxRangeInput').value) || 500;
       const miles_per_gallon = parseFloat(document.getElementById('mpgInput').value) || 10;
+      const tank_capacity = parseFloat(document.getElementById('tankInput').value) || 50;
       const corridor_miles = parseFloat(document.getElementById('corridorInput').value) || 5;
+
+      if (!start || !finish) {
+        showStatus("Please specify both an origin and a destination within the USA.", true);
+        return;
+      }
+      if (start.toLowerCase() === finish.toLowerCase()) {
+        showStatus("Destination cannot be identical to the starting location.", true);
+        return;
+      }
+
+      const maxPhysicalRange = tank_capacity * miles_per_gallon;
+      if (max_range > maxPhysicalRange) {
+        showStatus(`Configured maximum range (${max_range} mi) cannot exceed physical vehicle range (${tank_capacity} gal × ${miles_per_gallon} mpg = ${maxPhysicalRange} mi).`, true);
+        return;
+      }
 
       const submitBtn = document.getElementById('submitBtn');
       submitBtn.disabled = true;
@@ -326,6 +359,7 @@
             finish: finish,
             max_range: max_range,
             miles_per_gallon: miles_per_gallon,
+            tank_capacity: tank_capacity,
             corridor_miles: corridor_miles
           })
         });
@@ -333,8 +367,12 @@
         const data = await response.json();
 
         if (!response.ok || !data.success) {
-          const errMsg = data.error || data.details || 'Unable to optimize route.';
-          showStatus(typeof errMsg === 'object' ? JSON.stringify(errMsg) : errMsg, true);
+          let errMsg = data.error || 'Unable to optimize route.';
+          if (data.details && typeof data.details === 'object') {
+            const detailMsgs = Object.entries(data.details).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+            errMsg = `${errMsg} (${detailMsgs.join('; ')})`;
+          }
+          showStatus(errMsg, true);
           return;
         }
 
@@ -350,6 +388,8 @@
     }
 
     function renderResults(data) {
+      if (map) map.resize();
+
       // 1. Update Metrics Cards
       document.getElementById('metricsSection').classList.remove('hidden');
       document.getElementById('metricDistance').innerText = `${data.fuel_summary.total_distance_miles.toLocaleString()} mi`;
@@ -362,7 +402,11 @@
 
       if (data.origin_refuel) {
         document.getElementById('metricOriginPrice').innerText = `$${data.origin_refuel.fuel_price.toFixed(3)} / gal`;
-        document.getElementById('metricOriginNote').innerText = data.origin_refuel.station_name || 'Nearby station';
+        if (data.origin_refuel.detour_miles > 0) {
+          document.getElementById('metricOriginNote').innerText = `${data.origin_refuel.detour_miles} mi detour ($${data.origin_refuel.detour_cost_usd.toFixed(2)})`;
+        } else {
+          document.getElementById('metricOriginNote').innerText = data.origin_refuel.station_name || 'Nearby station';
+        }
       }
 
       // If map style is not yet fully loaded, queue the data
@@ -530,6 +574,13 @@
       let html = '';
 
       // Origin item
+      const detourInfo = (data.origin_refuel && data.origin_refuel.detour_miles > 0)
+        ? `<div class="mt-2 pt-2 border-t border-slate-800 flex justify-between text-xs text-slate-300">
+             <span>Initial Detour: <strong>${data.origin_refuel.detour_miles} mi</strong></span>
+             <span>Detour Fuel: <strong>$${data.origin_refuel.detour_cost_usd.toFixed(2)}</strong></span>
+           </div>`
+        : '';
+
       html += `
         <div class="p-3 rounded-lg bg-slate-900 border border-slate-700/80">
           <div class="flex items-center justify-between text-xs font-semibold text-emerald-400">
@@ -538,16 +589,24 @@
           </div>
           <p class="font-medium text-white text-sm mt-1">${data.route.start}</p>
           <p class="text-xs text-slate-400 mt-1">${data.origin_refuel ? data.origin_refuel.note : ''}</p>
+          ${detourInfo}
         </div>
       `;
 
       // Fuel stops
       data.stops.forEach((stop) => {
+        const precisionBadge = stop.is_exact
+          ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Exact</span>'
+          : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">City Centroid</span>';
+
         html += `
           <div class="p-3 rounded-lg bg-slate-900 border border-slate-700/80 hover:border-amber-500/50 transition">
             <div class="flex items-center justify-between text-xs">
               <span class="font-bold text-amber-400">⛽ STOP #${stop.stop_number}</span>
-              <span class="text-slate-400 font-mono">Mile ${stop.distance_along_route_miles}</span>
+              <div class="flex items-center gap-1.5">
+                ${precisionBadge}
+                <span class="text-slate-400 font-mono">Mile ${stop.distance_along_route_miles}</span>
+              </div>
             </div>
             <p class="font-semibold text-white text-sm mt-1">${stop.station_name}</p>
             <p class="text-xs text-slate-400">${stop.address}, ${stop.city}, ${stop.state}</p>

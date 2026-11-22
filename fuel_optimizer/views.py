@@ -1,6 +1,7 @@
 import logging
 from django.shortcuts import render
 from django.conf import settings
+from django.db import connection
 from rest_framework import status, generics, filters
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def map_view(request):
-    """Serve the interactive Leaflet.js map frontend application."""
+    """Serve the interactive MapLibre GL JS / OpenFreeMap map frontend application."""
     return render(request, 'index.html')
 
 
@@ -74,9 +75,10 @@ class RouteOptimizeView(APIView):
         validated = serializer.validated_data
         start_query = validated['start'].strip()
         finish_query = validated['finish'].strip()
-        max_range = validated.get('max_range', 500.0)
-        mpg = validated.get('miles_per_gallon', 10.0)
-        corridor_miles = validated.get('corridor_miles', 5.0)
+        max_range = validated.get('max_range', getattr(settings, 'DEFAULT_MAX_RANGE_MILES', 500.0))
+        mpg = validated.get('miles_per_gallon', getattr(settings, 'DEFAULT_MPG', 10.0))
+        tank_capacity = validated.get('tank_capacity', getattr(settings, 'DEFAULT_TANK_CAPACITY_GALLONS', 50.0))
+        corridor_miles = validated.get('corridor_miles', getattr(settings, 'DEFAULT_CORRIDOR_MILES', 5.0))
 
         # 1. Geocode Start & Finish with US Validation
         try:
@@ -128,7 +130,8 @@ class RouteOptimizeView(APIView):
         try:
             eligible_stations = StationFilterService.filter_stations_along_route(
                 route_coordinates=route_data['coordinates'],
-                corridor_miles=corridor_miles
+                corridor_miles=corridor_miles,
+                total_route_distance_miles=route_data['distance_miles']
             )
         except Exception as e:
             logger.exception("Error filtering stations along route")
@@ -146,8 +149,8 @@ class RouteOptimizeView(APIView):
             optimizer = FuelRouteOptimizer(
                 max_range_miles=max_range,
                 miles_per_gallon=mpg,
-                tank_capacity_gallons=50.0,
-                origin_refuel_radius_miles=25.0
+                tank_capacity_gallons=tank_capacity,
+                origin_refuel_radius_miles=getattr(settings, 'DEFAULT_ORIGIN_REFUEL_RADIUS_MILES', 25.0)
             )
             result = optimizer.optimize_route(
                 start_location=start_geo['formatted_address'],
@@ -236,15 +239,32 @@ class HealthCheckView(APIView):
     Health check endpoint verifying database connectivity and service availability.
     """
 
-    @extend_schema(responses={200: dict})
+    @extend_schema(responses={200: dict, 503: dict})
     def get(self, request, *args, **kwargs):
-        station_count = FuelStation.objects.count()
-        geocode_count = GeocodeCache.objects.count()
+        db_connected = False
+        db_error = None
+        station_count = 0
+        geocode_count = 0
 
-        return Response({
-            'status': 'healthy',
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            db_connected = True
+            station_count = FuelStation.objects.count()
+            geocode_count = GeocodeCache.objects.count()
+        except Exception as e:
+            logger.exception("Database health check probe failed")
+            db_error = str(e)
+
+        overall_status = 'healthy' if db_connected else 'unhealthy'
+        http_status = status.HTTP_200_OK if db_connected else status.HTTP_503_SERVICE_UNAVAILABLE
+
+        response_payload = {
+            'status': overall_status,
+            'application': 'Fuel Route Optimizer API',
             'database': {
-                'connected': True,
+                'connected': db_connected,
                 'total_stations': station_count,
                 'cached_geocodes': geocode_count,
             },
@@ -259,4 +279,8 @@ class HealthCheckView(APIView):
                 'corridor_miles': getattr(settings, 'DEFAULT_CORRIDOR_MILES', 5.0),
             },
             'version': '1.0.0'
-        }, status=status.HTTP_200_OK)
+        }
+        if db_error:
+            response_payload['database']['error'] = db_error
+
+        return Response(response_payload, status=http_status)

@@ -20,6 +20,15 @@ class FuelStation(models.Model):
     )
     latitude = models.FloatField(db_index=True)
     longitude = models.FloatField(db_index=True)
+    is_exact = models.BooleanField(
+        default=False,
+        help_text="True if resolved to exact street address, False if approximate city centroid"
+    )
+    geocode_source = models.CharField(
+        max_length=50,
+        default='city_centroid',
+        help_text="Geocoding source or precision (e.g., exact_address, city_centroid, offline_gazetteer)"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -30,10 +39,12 @@ class FuelStation(models.Model):
             models.Index(fields=['latitude', 'longitude'], name='idx_station_coords'),
             models.Index(fields=['state', 'fuel_price'], name='idx_station_state_price'),
             models.Index(fields=['station_id'], name='idx_station_opis_id'),
+            models.Index(fields=['is_exact'], name='idx_station_is_exact'),
         ]
 
     def __str__(self):
-        return f"{self.station_name} ({self.city}, {self.state}) - ${self.fuel_price}/gal"
+        precision = "exact" if self.is_exact else "approx"
+        return f"{self.station_name} ({self.city}, {self.state}) - ${self.fuel_price}/gal [{precision}]"
 
 
 class GeocodeCache(models.Model):
@@ -46,13 +57,18 @@ class GeocodeCache(models.Model):
     longitude = models.FloatField()
     formatted_address = models.CharField(max_length=255, blank=True)
     provider = models.CharField(max_length=50, default='census')
+    is_exact = models.BooleanField(
+        default=False,
+        help_text="True if full street address match, False if city/state centroid"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = 'geocode_cache'
 
     def __str__(self):
-        return f"{self.query} -> ({self.latitude}, {self.longitude})"
+        precision = "exact" if self.is_exact else "approx"
+        return f"{self.query} -> ({self.latitude}, {self.longitude}) [{precision}]"
 
 
 class RouteCache(models.Model):

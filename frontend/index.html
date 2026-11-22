@@ -177,9 +177,9 @@
       </form>
       <div class="mt-3 pt-3 border-t border-slate-700/60 flex flex-wrap items-center justify-between text-xs text-slate-400 gap-2">
         <div class="flex items-center gap-3">
-          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-emerald-400"></span> Empty-tank origin start</span>
-          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-blue-400"></span> 1.2x road circuity detour model</span>
-          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-amber-400"></span> 25-mi origin refuel search</span>
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-emerald-400"></span> Pre-trip refuel pricing at Mile 0</span>
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-blue-400"></span> 25-mi origin search radius</span>
+          <span class="inline-flex items-center gap-1 text-slate-300"><span class="w-2 h-2 rounded-full bg-amber-400"></span> OSRM highway routing</span>
         </div>
         <div class="text-slate-400">
           Constraints: <code class="text-emerald-300">range &le; tank &times; mpg</code> &bull; <code class="text-emerald-300">corridor &le; 25 mi</code>
@@ -402,11 +402,7 @@
 
       if (data.origin_refuel) {
         document.getElementById('metricOriginPrice').innerText = `$${data.origin_refuel.fuel_price.toFixed(3)} / gal`;
-        if (data.origin_refuel.detour_miles > 0) {
-          document.getElementById('metricOriginNote').innerText = `${data.origin_refuel.detour_miles} mi detour ($${data.origin_refuel.detour_cost_usd.toFixed(2)})`;
-        } else {
-          document.getElementById('metricOriginNote').innerText = data.origin_refuel.station_name || 'Nearby station';
-        }
+        document.getElementById('metricOriginNote').innerText = `${data.origin_refuel.station_name} (${data.origin_refuel.distance_to_origin_miles} mi)`;
       }
 
       // If map style is not yet fully loaded, queue the data
@@ -574,10 +570,10 @@
       let html = '';
 
       // Origin item
-      const detourInfo = (data.origin_refuel && data.origin_refuel.detour_miles > 0)
+      const initialLegInfo = data.origin_refuel
         ? `<div class="mt-2 pt-2 border-t border-slate-800 flex justify-between text-xs text-slate-300">
-             <span>Initial Detour: <strong>${data.origin_refuel.detour_miles} mi</strong></span>
-             <span>Detour Fuel: <strong>$${data.origin_refuel.detour_cost_usd.toFixed(2)}</strong></span>
+             <span>Initial Leg: <strong>${data.origin_refuel.initial_leg_distance_miles} mi (${data.origin_refuel.initial_leg_fuel_gallons} gal)</strong></span>
+             <span>Initial Leg Cost: <strong>$${data.origin_refuel.initial_leg_cost_usd.toFixed(2)}</strong></span>
            </div>`
         : '';
 
@@ -589,7 +585,7 @@
           </div>
           <p class="font-medium text-white text-sm mt-1">${data.route.start}</p>
           <p class="text-xs text-slate-400 mt-1">${data.origin_refuel ? data.origin_refuel.note : ''}</p>
-          ${detourInfo}
+          ${initialLegInfo}
         </div>
       `;
 

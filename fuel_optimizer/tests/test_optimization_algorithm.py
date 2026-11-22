@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.test import TestCase
 from fuel_optimizer.models import FuelStation
-from fuel_optimizer.services.optimization import FuelRouteOptimizer, OptimizationError, ROAD_CIRCUITY_FACTOR
+from fuel_optimizer.services.optimization import FuelRouteOptimizer, OptimizationError
 
 
 class FuelRouteOptimizerTest(TestCase):
@@ -159,11 +159,13 @@ class FuelRouteOptimizerTest(TestCase):
         self.assertTrue(result['success'])
         self.assertEqual(result['fuel_summary']['num_stops'], 0)
         self.assertEqual(len(result['stops']), 0)
-        self.assertEqual(result['fuel_summary']['route_distance_miles'], 225.0)
-        # 225 miles / 10 mpg = 22.5 gal (detour is 0.0 because station is at exact start coords)
+        self.assertEqual(result['fuel_summary']['total_distance_miles'], 225.0)
         self.assertEqual(result['fuel_summary']['total_fuel_gallons'], 22.5)
         # 22.5 gal * $3.50 = $78.75
         self.assertEqual(result['fuel_summary']['total_fuel_cost_usd'], 78.75)
+        self.assertEqual(result['origin_refuel']['initial_leg_distance_miles'], 225.0)
+        self.assertEqual(result['origin_refuel']['initial_leg_fuel_gallons'], 22.5)
+        self.assertEqual(result['origin_refuel']['initial_leg_cost_usd'], 78.75)
 
     # -------------------------------------------------------------------------
     # Scenario 3: Unreachable Range Gap Raises OptimizationError
@@ -297,7 +299,7 @@ class FuelRouteOptimizerTest(TestCase):
     # -------------------------------------------------------------------------
     def test_initial_station_unreachable_raises_optimization_error(self):
         """When no station exists within origin_refuel_radius, an informative error is raised."""
-        # Using remote coords in Alaska where no station exists within 25 miles
+        # Remote coords in Alaska where no station exists within 25 miles
         remote_coords = (65.0, -150.0)
 
         with self.assertRaises(OptimizationError) as ctx:
@@ -312,16 +314,16 @@ class FuelRouteOptimizerTest(TestCase):
                 eligible_stations=[]
             )
 
-        self.assertIn("No eligible fuel station found within", str(ctx.exception))
-        self.assertIn("empty-tank assumption", str(ctx.exception))
+        self.assertIn("No fuel station found within", str(ctx.exception))
+        self.assertIn("initial fuel price", str(ctx.exception))
 
     # -------------------------------------------------------------------------
-    # Scenario 7: Fuel Cost Calculated Correctly Across Multiple Segments with Decimal Precision
+    # Scenario 7: Fuel Cost Calculated Correctly and Fully Reconciled
     # -------------------------------------------------------------------------
     def test_fuel_cost_calculated_correctly_across_multiple_segments_decimal_precision(self):
         """
-        Verify that total cost strictly matches the sum of origin cost + stop segment costs
-        without IEEE 754 floating point rounding drift.
+        Verify that total cost strictly matches the sum of initial leg cost + intermediate stop costs
+        without IEEE 754 floating point rounding drift or component rounding discrepancies.
         """
         eligible = [
             {
@@ -364,16 +366,16 @@ class FuelRouteOptimizerTest(TestCase):
         origin_refuel = result['origin_refuel']
         stops = result['stops']
 
-        # Verify total gallons strictly equals total origin gallons + sum of stop gallons
-        sum_gallons = round(origin_refuel['total_origin_gallons'] + sum(s['fuel_added_gallons'] for s in stops), 2)
+        # Verify total gallons strictly equals initial leg gallons + sum of stop gallons
+        sum_gallons = round(origin_refuel['initial_leg_fuel_gallons'] + sum(s['fuel_added_gallons'] for s in stops), 2)
         self.assertEqual(fuel_summary['total_fuel_gallons'], sum_gallons)
 
-        # Verify total cost strictly equals total origin cost + sum of segment costs
-        sum_costs = round(origin_refuel['total_origin_cost_usd'] + sum(s['segment_cost_usd'] for s in stops), 2)
+        # Monetary reconciliation: Total cost MUST strictly equal initial leg cost + sum of stop segment costs
+        sum_costs = round(origin_refuel['initial_leg_cost_usd'] + sum(s['segment_cost_usd'] for s in stops), 2)
         self.assertEqual(fuel_summary['total_fuel_cost_usd'], sum_costs)
 
     # -------------------------------------------------------------------------
-    # Scenario 8: Fewer Stops Chosen When Costs Are Equal (Tie-Breaker)
+    # Scenario 8: Fewer Stops Chosen When Costs Are Equal (Exact Tie-Breaker)
     # -------------------------------------------------------------------------
     def test_route_uses_fewer_stops_when_costs_are_equal_tie_breaker(self):
         """When multiple valid paths have equal fuel cost, the route with fewer stops is preferred."""
@@ -381,7 +383,7 @@ class FuelRouteOptimizerTest(TestCase):
         # Path 1 (2 stops): 0 -> 200 mi (Station 301) -> 500 mi (Station 303) -> 800 mi.
         # Path 2 (1 stop):  0 -> 400 mi (Station 302) -> 800 mi.
         # Both paths use fuel at $3.50/gal everywhere -> identical cost (80 gal * $3.50 = $280).
-        # Tie-breaker MUST select Path 2 with 1 stop over Path 1 with 2 stops.
+        # Exact tie-breaker MUST select Path 2 with 1 stop over Path 1 with 2 stops.
         eligible = [
             {
                 'station_id': 301,
@@ -433,3 +435,35 @@ class FuelRouteOptimizerTest(TestCase):
         # The 1-stop path must be selected over the 2-stop path
         self.assertEqual(result['fuel_summary']['num_stops'], 1)
         self.assertEqual(result['stops'][0]['station_id'], 302)
+
+    # -------------------------------------------------------------------------
+    # Scenario 9: Geographically Correct Bounding Box for Origin Station Search
+    # -------------------------------------------------------------------------
+    def test_geographically_correct_bounding_box(self):
+        """
+        Verify that origin station search correctly calculates latitude-adjusted longitude bounds
+        and verifies straight-line distance.
+        """
+        # Place a station at latitude 60.0 degrees (cos(60) = 0.5, so 1 deg lon is only ~34.5 miles)
+        # At lat 60.0, lon -140.0:
+        # A station at lon -140.5 is 0.5 * 34.5 ~ 17.25 miles away (within 25 mi)
+        FuelStation.objects.create(
+            station_id=777,
+            station_name="High Latitude Test Station",
+            address="Highway 1",
+            city="Anchorage Area",
+            state="AK",
+            rack_id=1,
+            fuel_price=Decimal("3.4000"),
+            latitude=60.0,
+            longitude=-140.4,
+            is_exact=True,
+            geocode_source='exact'
+        )
+
+        station = self.optimizer._get_origin_refuel_station(
+            start_coords=(60.0, -140.0),
+            eligible_stations=[]
+        )
+        self.assertEqual(station['station_id'], 777)
+        self.assertLessEqual(station['distance_to_origin_miles'], 25.0)

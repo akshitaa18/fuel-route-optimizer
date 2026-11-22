@@ -134,11 +134,11 @@ class RouteOptimizeView(APIView):
                 total_route_distance_miles=route_data['distance_miles']
             )
         except Exception as e:
-            logger.exception("Error filtering stations along route")
+            logger.exception("Error filtering stations along route: %s", e)
             return Response(
                 {
                     'success': False,
-                    'error': f"Failed to filter stations along route: {e}",
+                    'error': "An internal error occurred while identifying fuel stations along the route.",
                     'error_type': 'SpatialFilterError'
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -176,11 +176,11 @@ class RouteOptimizeView(APIView):
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY
             )
         except Exception as e:
-            logger.exception("Unexpected error during route optimization")
+            logger.exception("Unexpected error during route optimization: %s", e)
             return Response(
                 {
                     'success': False,
-                    'error': f"Internal optimization error: {e}",
+                    'error': "An unexpected internal error occurred while calculating the optimal fuel route.",
                     'error_type': 'InternalError'
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR

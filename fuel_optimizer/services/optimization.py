@@ -4,9 +4,6 @@ from typing import List, Dict, Any, Optional, Tuple
 from fuel_optimizer.models import FuelStation
 from fuel_optimizer.services.station_filtering import haversine_distance
 
-# Conservative road circuity factor to approximate real road network distance from straight-line Haversine
-ROAD_CIRCUITY_FACTOR = 1.2
-
 
 class OptimizationError(Exception):
     """Raised when route cannot be optimized or destination is unreachable."""
@@ -16,19 +13,21 @@ class OptimizationError(Exception):
 class FuelRouteOptimizer:
     """
     Graph-based Dynamic Programming cost optimizer for fuel stops.
-    Determines the globally least-cost sequence of fuel purchases respecting
+    Determines the least-cost sequence of fuel purchases respecting
     the vehicle's maximum driving range and physical tank capacity.
     
     Mathematical Formulation:
-    - Origin Refueling: The vehicle starts with an empty tank. It must refuel at an initial
-      station within `origin_refuel_radius_miles`. The detour distance to this station is
-      conservatively modeled using the Haversine distance adjusted by a 1.2 road circuity factor.
+    - Initial Refuelling: The cheapest available station within `origin_refuel_radius_miles`
+      (straight-line distance) of the origin is selected as the pre-trip refuelling price source
+      at route mile zero. Station-access detour distance is excluded.
     - Feasibility Constraints: Every driving segment (u, v) must satisfy:
         distance(u, v) <= max_range_miles
         gallons(u, v)  <= tank_capacity_gallons
     - Cost Minimization: Fuel for segment (u, v) is purchased at station u at price P_u:
         cost(u, v) = (distance(u, v) / MPG) * P_u
-    - All intermediate arithmetic is calculated using Python Decimal to avoid binary float errors.
+    - All intermediate arithmetic is calculated using exact Python Decimal.
+    - Tie-breaking: When candidate paths have strictly equal cost, the path with fewer
+      intermediate stops is selected.
     """
 
     def __init__(
@@ -77,18 +76,13 @@ class FuelRouteOptimizer:
                 f"achievable on a full tank ({self.tank_capacity} gal * {self.mpg} MPG = {max_phys_range} miles)."
             )
 
-        # 1. Identify initial refueling station within origin radius
+        # 1. Identify pre-trip refueling station within origin radius
         origin_station_info = self._get_origin_refuel_station(start_coords, eligible_stations)
         origin_price_dec = Decimal(str(origin_station_info['fuel_price']))
-        detour_dist_dec = Decimal(str(origin_station_info['detour_miles']))
         mpg_dec = Decimal(str(self.mpg))
 
-        # Initial refuel detour cost: fuel to travel from origin to station
-        detour_gallons_dec = detour_dist_dec / mpg_dec
-        detour_cost_dec = detour_gallons_dec * origin_price_dec
-
         # 2. Construct Graph Nodes:
-        # Node 0: Origin / Initial Refueling Station (at along-route position 0.0)
+        # Node 0: Origin Refueling Station (at along-route position 0.0)
         nodes = [{
             'node_id': 0,
             'type': 'origin',
@@ -103,9 +97,7 @@ class FuelRouteOptimizer:
             'station_id': origin_station_info.get('station_id'),
             'is_exact': origin_station_info.get('is_exact', False),
             'geocode_source': origin_station_info.get('geocode_source', 'city_centroid'),
-            'detour_miles': detour_dist_dec,
-            'detour_cost': detour_cost_dec,
-            'detour_gallons': detour_gallons_dec,
+            'distance_to_origin_miles': origin_station_info['distance_to_origin_miles'],
         }]
 
         # Intermediate stations along the route
@@ -176,8 +168,8 @@ class FuelRouteOptimizer:
         dp_stops = [float('inf')] * num_nodes
         parent = [None] * num_nodes
 
-        # Base case: initial refuel detour cost to arrive at origin station
-        dp_cost[0] = detour_cost_dec
+        # Base case: 0 cost at origin at mile zero (pre-trip refuelling source established)
+        dp_cost[0] = Decimal('0.0')
         dp_stops[0] = 0
 
         # Topological relaxation over the DAG
@@ -207,12 +199,12 @@ class FuelRouteOptimizer:
                 candidate_cost = dp_cost[u] + seg_cost
                 candidate_stops = dp_stops[u] + (1 if u > 0 else 0)
 
-                # Relax edge: minimize cost, with tie-break on fewer stops
-                if candidate_cost < dp_cost[v] - Decimal('1e-6'):
+                # Direct Decimal comparison with exact equality tie-break preferring fewer stops
+                if candidate_cost < dp_cost[v]:
                     dp_cost[v] = candidate_cost
                     dp_stops[v] = candidate_stops
                     parent[v] = u
-                elif abs(candidate_cost - dp_cost[v]) <= Decimal('1e-6') and candidate_stops < dp_stops[v]:
+                elif candidate_cost == dp_cost[v] and candidate_stops < dp_stops[v]:
                     dp_stops[v] = candidate_stops
                     parent[v] = u
 
@@ -235,14 +227,13 @@ class FuelRouteOptimizer:
         path.reverse()
 
         stops = []
-        total_money_spent_dec = detour_cost_dec
         route_dist_dec = Decimal(str(total_distance_miles))
-        total_driving_distance_dec = route_dist_dec + detour_dist_dec
-        total_fuel_consumed_dec = total_driving_distance_dec / mpg_dec
+        total_fuel_consumed_dec = route_dist_dec / mpg_dec
 
         initial_leg_distance_dec = Decimal('0.0')
         initial_leg_gallons_dec = Decimal('0.0')
         initial_leg_cost_dec = Decimal('0.0')
+        intermediate_cost_sum_dec = Decimal('0.0')
 
         for step_idx in range(len(path) - 1):
             u_idx = path[step_idx]
@@ -252,15 +243,15 @@ class FuelRouteOptimizer:
             v_node = nodes[v_idx]
 
             seg_distance = v_node['distance_along_route_miles'] - u_node['distance_along_route_miles']
-            seg_gallons = seg_distance / mpg_dec
-            seg_cost = seg_gallons * u_node['fuel_price']
-            total_money_spent_dec += seg_cost
+            seg_gallons = (seg_distance / mpg_dec).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            seg_cost = (seg_gallons * u_node['fuel_price']).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
             if u_node['type'] == 'origin':
                 initial_leg_distance_dec = seg_distance
                 initial_leg_gallons_dec = seg_gallons
                 initial_leg_cost_dec = seg_cost
             elif u_node['type'] == 'fuel_stop':
+                intermediate_cost_sum_dec += seg_cost
                 stops.append({
                     'stop_number': len(stops) + 1,
                     'station_id': u_node['station_id'],
@@ -272,8 +263,8 @@ class FuelRouteOptimizer:
                     'distance_along_route_miles': float(u_node['distance_along_route_miles'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
                     'distance_from_route_miles': float(u_node.get('distance_from_route_miles', Decimal('0.0')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
                     'leg_distance_miles': float(seg_distance.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                    'fuel_added_gallons': float(seg_gallons.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                    'segment_cost_usd': float(seg_cost.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+                    'fuel_added_gallons': float(seg_gallons),
+                    'segment_cost_usd': float(seg_cost),
                     'is_exact': u_node.get('is_exact', False),
                     'geocode_source': u_node.get('geocode_source', 'city_centroid'),
                     'coordinates': {
@@ -282,33 +273,29 @@ class FuelRouteOptimizer:
                     }
                 })
 
-        # Calculate average fuel cost per gallon
+        # Reconcile displayed monetary breakdown:
+        # Total cost is strictly the sum of the initial leg cost and all intermediate stop segment costs
+        total_money_spent_dec = initial_leg_cost_dec + intermediate_cost_sum_dec
+        total_cost_rounded = float(total_money_spent_dec)
+        total_fuel_rounded = float(total_fuel_consumed_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         avg_price_per_gal_dec = (
             total_money_spent_dec / total_fuel_consumed_dec
             if total_fuel_consumed_dec > Decimal('0.0') else Decimal('0.0')
         )
-
-        total_cost_rounded = float(total_money_spent_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
-        total_fuel_rounded = float(total_fuel_consumed_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
         avg_price_rounded = float(avg_price_per_gal_dec.quantize(Decimal('0.001'), rounding=ROUND_HALF_UP))
-        total_dist_rounded = float(total_driving_distance_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
-
-        total_origin_gallons_dec = detour_gallons_dec + initial_leg_gallons_dec
-        total_origin_cost_dec = detour_cost_dec + initial_leg_cost_dec
+        route_dist_rounded = round(total_distance_miles, 2)
 
         return {
             'success': True,
             'route': {
                 'start': start_location,
                 'finish': finish_location,
-                'distance_miles': round(total_distance_miles, 2),
-                'total_driving_distance_miles': total_dist_rounded,
+                'distance_miles': route_dist_rounded,
                 'duration_hours': round(duration_hours, 2),
                 'geometry': route_geometry,
             },
             'fuel_summary': {
-                'total_distance_miles': total_dist_rounded,
-                'route_distance_miles': round(total_distance_miles, 2),
+                'total_distance_miles': route_dist_rounded,
                 'total_fuel_gallons': total_fuel_rounded,
                 'total_fuel_cost_usd': total_cost_rounded,
                 'num_stops': len(stops),
@@ -322,22 +309,16 @@ class FuelRouteOptimizer:
                 'city': origin_station_info.get('city', ''),
                 'state': origin_station_info.get('state', ''),
                 'fuel_price': float(origin_price_dec),
-                'detour_distance_miles': float(detour_dist_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'detour_miles': float(detour_dist_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'detour_fuel_gallons': float(detour_gallons_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'detour_cost_usd': float(detour_cost_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
+                'distance_to_origin_miles': origin_station_info['distance_to_origin_miles'],
                 'initial_leg_distance_miles': float(initial_leg_distance_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'initial_leg_fuel_gallons': float(initial_leg_gallons_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'initial_leg_cost_usd': float(initial_leg_cost_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'total_origin_gallons': float(total_origin_gallons_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'total_origin_cost_usd': float(total_origin_cost_dec.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)),
-                'is_detour_modelled': True,
-                'road_circuity_factor': ROAD_CIRCUITY_FACTOR,
+                'initial_leg_fuel_gallons': float(initial_leg_gallons_dec),
+                'initial_leg_cost_usd': float(initial_leg_cost_dec),
                 'is_exact': origin_station_info.get('is_exact', False),
                 'geocode_source': origin_station_info.get('geocode_source', 'city_centroid'),
                 'note': (
-                    f"Empty-tank starting assumption: initial refueling at {origin_station_info['name']} "
-                    f"(${float(origin_price_dec):.3f}/gal) located {float(detour_dist_dec):.1f} mi detour from origin."
+                    f"Pre-trip refuelling price source: {origin_station_info['name']} "
+                    f"(${float(origin_price_dec):.3f}/gal) located {origin_station_info['distance_to_origin_miles']:.1f} mi "
+                    f"straight-line from origin. Station-access detour distance is excluded."
                 ),
                 'coordinates': {
                     'latitude': origin_station_info['latitude'],
@@ -352,14 +333,16 @@ class FuelRouteOptimizer:
                 },
                 'corridor_stations_count': len(eligible_stations),
                 'graph_nodes_evaluated': num_nodes,
-                'algorithm': 'Graph-based Dynamic Programming (DAG Least Cost with Python Decimal)',
+                'algorithm': 'Graph-based Dynamic Programming (DAG Least Cost with Exact Decimal Comparison)',
                 'coordinate_precision_policy': (
-                    'Includes verified city-centroid coordinates under conservative 5-mile corridor policy; '
-                    'exact street addresses noted where available.'
+                    'Fuel stations from the provided OPIS dataset use approximate city-centroid coordinates. '
+                    'Coordinate approximations can affect station positioning, corridor eligibility and recommended stops. '
+                    'Distances from the route represent perpendicular cross-track Euclidean distance, not road detours.'
                 ),
-                'detour_modeling_policy': (
-                    'Initial detour distance uses Haversine distance from origin with a 1.2 road circuity factor. '
-                    'Intermediate corridor stations use perpendicular cross-track projection.'
+                'initial_refueling_policy': (
+                    'The cheapest station within a 25-mile straight-line radius of the origin is used as the '
+                    'pre-trip fuel price source for the initial route leg starting at mile zero. '
+                    'Station-access detour distance is excluded from route distance and expenditure.'
                 ),
             }
         }
@@ -370,25 +353,30 @@ class FuelRouteOptimizer:
         eligible_stations: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Find the cheapest fuel station physically reachable within origin_refuel_radius miles of start coords.
-        Does not perform wide-country fallback; if no station is within radius, raises OptimizationError.
+        Find the cheapest fuel station physically reachable within origin_refuel_radius miles (straight-line)
+        of start coords. Uses a geographically correct bounding box (latitude-adjusted for longitude)
+        and verifies the final straight-line distance against the configured radius.
         """
         lat, lon = start_coords
-        radius_deg = self.origin_refuel_radius / 60.0
 
-        # Query DB stations within bounding box
+        # 1 degree latitude ~ 69.0 miles
+        lat_delta = self.origin_refuel_radius / 69.0
+        # 1 degree longitude ~ 69.0 * cos(lat) miles
+        cos_lat = max(math.cos(math.radians(lat)), 0.01)
+        lon_delta = self.origin_refuel_radius / (69.0 * cos_lat)
+
+        # Query DB stations within geographically adjusted bounding box
         nearby = FuelStation.objects.filter(
-            latitude__gte=lat - radius_deg,
-            latitude__lte=lat + radius_deg,
-            longitude__gte=lon - radius_deg,
-            longitude__lte=lon + radius_deg,
+            latitude__gte=lat - lat_delta,
+            latitude__lte=lat + lat_delta,
+            longitude__gte=lon - lon_delta,
+            longitude__lte=lon + lon_delta,
         )
 
         candidates = []
         for st in nearby:
             d_straight = haversine_distance(lat, lon, st.latitude, st.longitude)
             if d_straight <= self.origin_refuel_radius:
-                d_road = round(d_straight * ROAD_CIRCUITY_FACTOR, 2)
                 candidates.append({
                     'station_id': st.station_id,
                     'name': st.station_name,
@@ -400,41 +388,41 @@ class FuelRouteOptimizer:
                     'longitude': st.longitude,
                     'is_exact': st.is_exact,
                     'geocode_source': st.geocode_source,
-                    'detour_miles': d_road,
-                    'distance': d_straight
+                    'distance_to_origin_miles': round(d_straight, 2),
                 })
 
         if candidates:
-            # Sort primarily by lowest price, secondary by shortest detour
-            candidates.sort(key=lambda x: (x['fuel_price'], x['detour_miles']))
+            # Sort primarily by lowest price, secondary by shortest straight-line distance
+            candidates.sort(key=lambda x: (x['fuel_price'], x['distance_to_origin_miles']))
             return candidates[0]
 
-        # Check eligible corridor stations near origin (along-route <= origin_refuel_radius)
-        first_stations = [s for s in eligible_stations if s['distance_along_route_miles'] <= self.origin_refuel_radius]
-        if first_stations:
-            first_stations.sort(key=lambda s: s['fuel_price'])
-            st = first_stations[0]
+        # Check eligible corridor stations near origin (straight-line <= origin_refuel_radius)
+        corridor_candidates = []
+        for st in eligible_stations:
             d_straight = haversine_distance(lat, lon, st['latitude'], st['longitude'])
-            d_road = round(d_straight * ROAD_CIRCUITY_FACTOR, 2)
-            return {
-                'station_id': st['station_id'],
-                'name': st['station_name'],
-                'address': st.get('address', ''),
-                'city': st.get('city', ''),
-                'state': st.get('state', ''),
-                'fuel_price': st['fuel_price'],
-                'latitude': st['latitude'],
-                'longitude': st['longitude'],
-                'is_exact': st.get('is_exact', False),
-                'geocode_source': st.get('geocode_source', 'city_centroid'),
-                'detour_miles': d_road,
-                'distance': d_straight,
-            }
+            if d_straight <= self.origin_refuel_radius:
+                corridor_candidates.append({
+                    'station_id': st['station_id'],
+                    'name': st['station_name'],
+                    'address': st.get('address', ''),
+                    'city': st.get('city', ''),
+                    'state': st.get('state', ''),
+                    'fuel_price': float(st['fuel_price']),
+                    'latitude': st['latitude'],
+                    'longitude': st['longitude'],
+                    'is_exact': st.get('is_exact', False),
+                    'geocode_source': st.get('geocode_source', 'city_centroid'),
+                    'distance_to_origin_miles': round(d_straight, 2),
+                })
+
+        if corridor_candidates:
+            corridor_candidates.sort(key=lambda x: (x['fuel_price'], x['distance_to_origin_miles']))
+            return corridor_candidates[0]
 
         # If no station exists within origin_refuel_radius, raise OptimizationError
         raise OptimizationError(
-            f"No eligible fuel station found within the {self.origin_refuel_radius}-mile origin search radius. "
-            f"Under the empty-tank assumption, the vehicle cannot refuel to begin the journey."
+            f"No fuel station found within the {self.origin_refuel_radius}-mile search radius of the origin ({lat:.4f}, {lon:.4f}). "
+            f"Unable to establish an initial fuel price."
         )
 
     def _diagnose_unreachable_gap(self, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
